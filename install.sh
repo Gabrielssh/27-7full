@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_DIR="$HOME/stream_manager"
-SCRIPT_URL="https://github.com/Gabriessh/24-7iptv/raw/master/24/7.sh"
+SCRIPT_URL="https://github.com/Gabrielssh/27-7full/blob/main/stream24.sh"
 SCRIPT_NAME="stream-manager.sh"
 BIN_NAME="stream24"
 
