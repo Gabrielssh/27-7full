@@ -2,53 +2,80 @@
 
 set -e
 
-echo "🚀 Instalador 27-7full (modo usuário)"
+# ==============================
+# Detectar root/sudo
+# ==============================
+if [[ $EUID -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "❌ Execute como root ou instale sudo."
+    exit 1
+  fi
+else
+  SUDO=""
+fi
 
 # ==============================
-# Bloquear execução como root
+# Detectar sistema operacional
 # ==============================
-if [[ $EUID -eq 0 ]]; then
-  echo "❌ Não execute como root!"
-  echo "👉 Rode como usuário normal."
+if [[ -f /etc/os-release ]]; then
+  . /etc/os-release
+  OS=$ID
+else
+  echo "❌ Sistema não suportado."
   exit 1
 fi
 
+echo "📦 Detectado: $OS"
+
 # ==============================
-# Verificar dependências
+# Instalar dependências
 # ==============================
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "❌ Dependência faltando: $1"
-    echo "👉 Peça ao admin da VPS para instalar."
-    exit 1
-  }
+install_deps() {
+  case "$OS" in
+    ubuntu|debian)
+      $SUDO apt update -y
+      $SUDO apt install -y curl wget git unzip
+      ;;
+    centos|rhel|fedora|almalinux|rocky)
+      $SUDO dnf install -y curl wget git unzip || \
+      $SUDO yum install -y curl wget git unzip
+      ;;
+    arch)
+      $SUDO pacman -Sy --noconfirm curl wget git unzip
+      ;;
+    *)
+      echo "⚠️ OS não testado. Tentando instalar dependências..."
+      ;;
+  esac
 }
 
-need_cmd curl
-need_cmd git
-need_cmd unzip
+install_deps
 
 # ==============================
-# Diretório de instalação
+# Baixar arquivos do projeto
 # ==============================
-WORKDIR="$HOME/27-7full"
+WORKDIR="/opt/27-7full"
 
 echo "📂 Instalando em $WORKDIR"
 
-rm -rf "$WORKDIR"
-git clone https://github.com/Gabrielssh/27-7full "$WORKDIR"
+$SUDO rm -rf "$WORKDIR"
+$SUDO git clone https://github.com/Gabrielssh/27-7full "$WORKDIR"
 
 cd "$WORKDIR"
 
-chmod +x *.sh
+# ==============================
+# Permissões
+# ==============================
+$SUDO chmod +x *.sh
 
 # ==============================
-# Setup opcional
+# Rodar setup principal
 # ==============================
 if [[ -f setup.sh ]]; then
-  echo "⚙️ Executando setup..."
-  bash setup.sh
+  echo "🚀 Executando setup..."
+  $SUDO bash setup.sh
+else
+  echo "✅ Instalação concluída."
 fi
-
-echo "✅ Instalação concluída!"
-echo "👉 Execute: cd $WORKDIR && ./start.sh"
