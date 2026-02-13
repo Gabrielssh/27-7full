@@ -1,65 +1,54 @@
 #!/usr/bin/env bash
+
 set -e
 
-PROJECT_DIR="$HOME/stream_manager"
-SCRIPT_URL="https://github.com/Gabrielssh/27-7full/blob/main/stream24.sh"
-SCRIPT_NAME="stream-manager.sh"
-BIN_NAME="stream24"
+echo "🚀 Instalador 27-7full (modo usuário)"
 
-echo "======================================"
-echo " STREAM MANAGER 24/7 - AUTO INSTALLER "
-echo "======================================"
-echo
-
-# Não rodar como root
-if [ "$EUID" -eq 0 ]; then
-  echo "❌ Não execute como root."
+# ==============================
+# Bloquear execução como root
+# ==============================
+if [[ $EUID -eq 0 ]]; then
+  echo "❌ Não execute como root!"
+  echo "👉 Rode como usuário normal."
   exit 1
 fi
 
-# Verificar Ubuntu
-if ! grep -qi ubuntu /etc/os-release; then
-  echo "❌ Apenas Ubuntu é suportado."
-  exit 1
+# ==============================
+# Verificar dependências
+# ==============================
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "❌ Dependência faltando: $1"
+    echo "👉 Peça ao admin da VPS para instalar."
+    exit 1
+  }
+}
+
+need_cmd curl
+need_cmd git
+need_cmd unzip
+
+# ==============================
+# Diretório de instalação
+# ==============================
+WORKDIR="$HOME/27-7full"
+
+echo "📂 Instalando em $WORKDIR"
+
+rm -rf "$WORKDIR"
+git clone https://github.com/Gabrielssh/27-7full "$WORKDIR"
+
+cd "$WORKDIR"
+
+chmod +x *.sh
+
+# ==============================
+# Setup opcional
+# ==============================
+if [[ -f setup.sh ]]; then
+  echo "⚙️ Executando setup..."
+  bash setup.sh
 fi
 
-echo "🔄 Atualizando sistema..."
-sudo apt update -y
-sudo apt upgrade -y
-
-echo "📦 Instalando dependências..."
-sudo apt install -y \
-  ffmpeg \
-  yt-dlp \
-  tmux \
-  coreutils \
-  procps \
-  curl
-
-echo "📁 Criando diretório..."
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR"
-
-echo "⬇️ Baixando script principal..."
-curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_NAME"
-
-echo "🔐 Ajustando permissões..."
-chmod +x "$SCRIPT_NAME"
-chmod -R 700 "$PROJECT_DIR"
-
-echo "🔗 Criando comando global..."
-sudo ln -sf "$PROJECT_DIR/$SCRIPT_NAME" "/usr/local/bin/$BIN_NAME"
-
-echo "🔄 Atualizando yt-dlp..."
-yt-dlp -U || true
-
-echo
-echo "✅ INSTALAÇÃO FINALIZADA!"
-echo
-echo "▶️ Execute com:"
-echo "   $BIN_NAME"
-echo
-echo "💡 Para rodar 24/7:"
-echo "   tmux new -s stream24 $BIN_NAME"
-echo
-echo "Ctrl+B depois D para sair do tmux"
+echo "✅ Instalação concluída!"
+echo "👉 Execute: cd $WORKDIR && ./start.sh"
