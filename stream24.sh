@@ -1,303 +1,165 @@
 #!/usr/bin/env bash
-# STREAM MANAGER PRO TOTAL 24/7
-# Requisitos: ffmpeg, yt-dlp, tmux, coreutils
-# Bash >= 4
 
-set -u
+# =====================================
+# IPTV PRO SERVER — AUTO INSTALLER
+# =====================================
 
-BASE_DIR="$HOME/stream_manager"
-STREAM_DIR="$BASE_DIR/streams"
-LOG_DIR="$BASE_DIR/logs"
-SCHEDULE_FILE="$BASE_DIR/schedule.txt"
-MAX_LOG_DAYS=30
+set -e
 
-mkdir -p "$STREAM_DIR" "$LOG_DIR"
-touch "$SCHEDULE_FILE"
+BASE="/root/iptv_pro"
+BIN="/usr/local/bin/menu"
 
-declare -A STREAMS_PID
-declare -A STREAM_HISTORY
-declare -A STREAM_CPU
-declare -A STREAM_RAM
-declare -A STREAM_UPTIME
+echo "================================="
+echo " IPTV PRO SERVER INSTALLER"
+echo "================================="
 
-# -------------------------
-# Rotação de logs
-# -------------------------
-rotate_logs() {
-    find "$LOG_DIR" -type f -mtime +"$MAX_LOG_DAYS" -delete 2>/dev/null
+if [ "$EUID" -ne 0 ]; then
+  echo "Execute como root:"
+  echo "sudo bash install.sh"
+  exit 1
+fi
+
+echo "[+] Atualizando sistema..."
+apt update -y
+
+echo "[+] Instalando dependências..."
+apt install -y ffmpeg curl wget git python3 python3-pip
+
+echo "[+] Instalando yt-dlp..."
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+-o /usr/local/bin/yt-dlp
+chmod +x /usr/local/bin/yt-dlp
+
+mkdir -p "$BASE/hls"
+
+echo "[+] Criando menu IPTV..."
+
+cat > "$BIN" << 'EOF'
+#!/usr/bin/env bash
+
+BASE="/root/iptv_pro"
+HLS="$BASE/hls"
+PLAYLIST="$BASE/playlist.m3u"
+
+mkdir -p "$HLS"
+
+declare -A STREAMS
+
+start_server() {
+  cd "$HLS"
+  python3 -m http.server 8080 >/dev/null 2>&1 &
+  SERVER_PID=$!
 }
 
-# -------------------------
-# Atualiza métricas
-# -------------------------
-update_metrics() {
-    for NAME in "${!STREAMS_PID[@]}"; do
-        PID="${STREAMS_PID[$NAME]}"
+add_youtube() {
+  read -rp "Nome do canal: " NAME
+  read -rp "Link YouTube: " LINK
 
-        if ps -p "$PID" >/dev/null 2>&1; then
-            CPU=$(ps -p "$PID" -o %cpu= | awk '{print int($1)}')
-            RAM=$(ps -p "$PID" -o rss= | awk '{printf "%.0f", $1/1024}')
-
-            STREAM_CPU["$NAME"]=$CPU
-            STREAM_RAM["$NAME"]=$RAM
-
-            if [ -z "${STREAM_UPTIME[$NAME]:-}" ]; then
-                STREAM_UPTIME["$NAME"]="$(date +%s)"
-            fi
-
-            echo "$(date +%H:%M:%S) CPU:${CPU}% RAM:${RAM}MB" >> "$LOG_DIR/$NAME-$(date +%F).log"
-        else
-            STREAM_CPU["$NAME"]=0
-            STREAM_RAM["$NAME"]=0
-        fi
-    done
-}
-
-# -------------------------
-# Barra ASCII
-# -------------------------
-draw_bar() {
-    local VALUE=$1
-    local MAX=$2
-    local WIDTH=20
-
-    [ "$MAX" -eq 0 ] && MAX=1
-    [ "$VALUE" -gt "$MAX" ] && VALUE="$MAX"
-
-    local FILLED=$(( VALUE * WIDTH / MAX ))
-    local EMPTY=$(( WIDTH - FILLED ))
-
-    printf "%0.s#" $(seq 1 "$FILLED")
-    printf "%0.s-" $(seq 1 "$EMPTY")
-}
-
-# -------------------------
-# Dashboard
-# -------------------------
-dashboard() {
+  (
     while true; do
-        clear
-        update_metrics
-        rotate_logs
+      URL=$(yt-dlp -f best -g "$LINK" 2>/dev/null)
+      [ -z "$URL" ] && sleep 5 && continue
 
-        echo "===== STREAM MANAGER 24/7 ====="
-        echo "Uptime VPS: $(uptime -p)"
-        echo "Streams ativas: ${#STREAMS_PID[@]}"
-        echo
+      ffmpeg -re -i "$URL" \
+      -c copy \
+      -f hls \
+      -hls_time 4 \
+      -hls_list_size 6 \
+      "$HLS/$NAME.m3u8"
 
-        printf "%-15s %-6s %-6s %-6s %-8s %-20s %-20s\n" \
-            "CANAL" "PID" "CPU%" "RAM" "STATUS" "CPU BAR" "RAM BAR"
-
-        for NAME in "${!STREAMS_PID[@]}"; do
-            PID="${STREAMS_PID[$NAME]}"
-            STATUS="OFF"
-
-            if ps -p "$PID" >/dev/null 2>&1; then
-                STATUS="ON"
-            fi
-
-            printf "%-15s %-6s %-6s %-6s %-8s %-20s %-20s\n" \
-                "$NAME" "$PID" \
-                "${STREAM_CPU[$NAME]:-0}" \
-                "${STREAM_RAM[$NAME]:-0}M" \
-                "$STATUS" \
-                "$(draw_bar "${STREAM_CPU[$NAME]:-0}" 100)" \
-                "$(draw_bar "${STREAM_RAM[$NAME]:-0}" 2048)"
-        done
-
-        sleep 2
+      sleep 2
     done
+  ) &
+
+  STREAMS["$NAME"]=$!
 }
 
-# -------------------------
-# Monitor automático
-# -------------------------
-monitor_alerts() {
-    for NAME in "${!STREAMS_PID[@]}"; do
-        PID="${STREAMS_PID[$NAME]}"
-
-        if ! ps -p "$PID" >/dev/null 2>&1; then
-            echo "[ALERTA] Stream '$NAME' caiu. Reiniciando..."
-            start_stream <<< "$NAME"
-        fi
-    done
-}
-
-# -------------------------
-# Adicionar stream
-# -------------------------
-add_stream() {
-    read -rp "Nome do canal: " NAME
-    read -rp "Link (YouTube / HLS / arquivo): " LINK
-
-    OUTPUT="$STREAM_DIR/$NAME.m3u8"
-
-    # HLS direto
-    if [[ "$LINK" =~ \.m3u8$ ]]; then
-        ffmpeg -re -i "$LINK" -c copy -f hls -hls_time 10 -hls_list_size 0 "$OUTPUT" \
-            >/dev/null 2>&1 &
-
-    # YouTube
-    elif [[ "$LINK" =~ youtu ]]; then
-        (
-            while true; do
-                URL=$(yt-dlp -f best -g "$LINK" 2>/dev/null)
-                [ -z "$URL" ] && sleep 5 && continue
-
-                ffmpeg -re -i "$URL" \
-                    -reconnect 1 \
-                    -reconnect_streamed 1 \
-                    -reconnect_delay_max 5 \
-                    -c:v copy -c:a aac \
-                    -f hls -hls_time 10 -hls_list_size 0 \
-                    "$OUTPUT"
-
-                sleep 2
-            done
-        ) >/dev/null 2>&1 &
-
-    # Arquivo local
-    else
-        if [ ! -f "$LINK" ]; then
-            echo "Arquivo não encontrado!"
-            return
-        fi
-
-        ffmpeg -stream_loop -1 -re -i "$LINK" \
-            -c:v copy -c:a aac \
-            -f hls -hls_time 10 -hls_list_size 0 \
-            "$OUTPUT" >/dev/null 2>&1 &
-    fi
-
-    STREAMS_PID["$NAME"]=$!
-    STREAM_HISTORY["$NAME"]="STARTED"
-
-    echo "Stream '$NAME' iniciada (PID ${STREAMS_PID[$NAME]})"
-}
-
-# -------------------------
-# Start stream existente
-# -------------------------
-start_stream() {
-    read NAME
-    OUTPUT="$STREAM_DIR/$NAME.m3u8"
-
-    if [ ! -f "$OUTPUT" ]; then
-        echo "Stream não encontrada!"
-        return
-    fi
-
-    ffmpeg -re -i "$OUTPUT" -c copy -f hls -hls_time 10 -hls_list_size 0 "$OUTPUT" \
-        >/dev/null 2>&1 &
-
-    STREAMS_PID["$NAME"]=$!
-    STREAM_HISTORY["$NAME"]="STARTED"
-}
-
-# -------------------------
-# Stop stream
-# -------------------------
 stop_stream() {
-    read -rp "Nome do canal: " NAME
-
-    PID="${STREAMS_PID[$NAME]:-}"
-
-    if [ -n "$PID" ]; then
-        kill "$PID" 2>/dev/null
-        unset STREAMS_PID["$NAME"]
-        STREAM_HISTORY["$NAME"]="STOPPED"
-        echo "Stream '$NAME' parada."
-    fi
+  read -rp "Nome: " NAME
+  kill "${STREAMS[$NAME]}" 2>/dev/null
+  unset STREAMS["$NAME"]
 }
 
-# -------------------------
-# Exportar M3U
-# -------------------------
-export_m3u() {
-    M3U="$BASE_DIR/playlist.m3u"
+export_playlist() {
+  IP=$(curl -s ifconfig.me)
 
-    echo "#EXTM3U" > "$M3U"
+  echo "#EXTM3U" > "$PLAYLIST"
 
-    for FILE in "$STREAM_DIR"/*.m3u8; do
-        [ -f "$FILE" ] || continue
-        NAME=$(basename "$FILE" .m3u8)
-        echo "#EXTINF:-1,$NAME" >> "$M3U"
-        echo "$FILE" >> "$M3U"
+  for FILE in "$HLS"/*.m3u8; do
+    [ -f "$FILE" ] || continue
+    NAME=$(basename "$FILE" .m3u8)
+
+    echo "#EXTINF:-1,$NAME" >> "$PLAYLIST"
+    echo "http://$IP:8080/$NAME.m3u8" >> "$PLAYLIST"
+  done
+
+  echo "Playlist criada:"
+  echo "$PLAYLIST"
+  read -rp "ENTER..."
+}
+
+dashboard() {
+  while true; do
+    clear
+    echo "===== IPTV PRO DASHBOARD ====="
+    echo "Streams ativas: ${#STREAMS[@]}"
+    echo
+
+    for NAME in "${!STREAMS[@]}"; do
+      PID="${STREAMS[$NAME]}"
+      if ps -p "$PID" >/dev/null 2>&1; then
+        echo "▶ $NAME ON"
+      else
+        echo "✖ $NAME OFF"
+      fi
     done
 
-    echo "Playlist exportada: $M3U"
+    sleep 2
+  done
 }
 
-# -------------------------
-# Histórico
-# -------------------------
-history_streams() {
-    echo "===== HISTÓRICO ====="
-    for NAME in "${!STREAM_HISTORY[@]}"; do
-        echo "$NAME : ${STREAM_HISTORY[$NAME]}"
-    done
+backup() {
+  tar -czf "$BASE/backup.tar.gz" "$BASE"
+  echo "Backup criado em $BASE/backup.tar.gz"
+  read
 }
 
-# -------------------------
-# Agendamento
-# -------------------------
-schedule_stream() {
-    read -rp "Nome do canal: " NAME
-    read -rp "Hora start (HH:MM): " HSTART
-    read -rp "Hora stop (HH:MM): " HSTOP
-
-    echo "$HSTART $NAME start" >> "$SCHEDULE_FILE"
-    echo "$HSTOP $NAME stop" >> "$SCHEDULE_FILE"
-
-    echo "Agendamento criado."
-}
-
-process_schedule() {
-    NOW=$(date +%H:%M)
-
-    while read -r TIME NAME ACTION; do
-        [ "$TIME" = "$NOW" ] || continue
-
-        if [ "$ACTION" = "start" ]; then
-            start_stream <<< "$NAME"
-        elif [ "$ACTION" = "stop" ]; then
-            stop_stream <<< "$NAME"
-        fi
-    done < "$SCHEDULE_FILE"
-}
-
-# -------------------------
-# Menu
-# -------------------------
 menu() {
-    while true; do
-        monitor_alerts
-        process_schedule
+  start_server
 
-        echo
-        echo "===== STREAM MANAGER 24/7 ====="
-        echo "1) Adicionar stream"
-        echo "2) Start stream"
-        echo "3) Stop stream"
-        echo "4) Dashboard"
-        echo "5) Exportar M3U"
-        echo "6) Histórico"
-        echo "7) Agendar"
-        echo "0) Sair"
-        read -rp "Opção: " OP
+  while true; do
+    clear
+    echo "===== IPTV PRO SERVER ====="
+    echo "1) Adicionar canal YouTube"
+    echo "2) Parar canal"
+    echo "3) Dashboard"
+    echo "4) Exportar playlist"
+    echo "5) Backup"
+    echo "0) Sair"
+    echo
 
-        case "$OP" in
-            1) add_stream ;;
-            2) start_stream ;;
-            3) stop_stream ;;
-            4) dashboard ;;
-            5) export_m3u ;;
-            6) history_streams ;;
-            7) schedule_stream ;;
-            0) exit 0 ;;
-            *) echo "Opção inválida!" ;;
-        esac
-    done
+    read -rp "Opção: " OP
+
+    case "$OP" in
+      1) add_youtube ;;
+      2) stop_stream ;;
+      3) dashboard ;;
+      4) export_playlist ;;
+      5) backup ;;
+      0) exit ;;
+    esac
+  done
 }
 
 menu
+EOF
+
+chmod +x "$BIN"
+
+echo
+echo "================================="
+echo " INSTALAÇÃO CONCLUÍDA ✅"
+echo "================================="
+echo
+echo "Digite: menu"
+echo
