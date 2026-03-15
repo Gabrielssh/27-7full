@@ -1,162 +1,165 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# =====================================
+# IPTV PRO SERVER — AUTO INSTALLER
+# =====================================
+
 set -e
 
-BASE="/root/ultraiptv"
-APP="$BASE/app"
-HLS="$BASE/hls"
-DB="$BASE/db"
+BASE="/root/iptv_pro"
+BIN="/usr/local/bin/menu"
 
-echo "===== ULTRA IPTV CORE INSTALL ====="
+echo "================================="
+echo " IPTV PRO SERVER INSTALLER"
+echo "================================="
 
+if [ "$EUID" -ne 0 ]; then
+  echo "Execute como root:"
+  echo "sudo bash install.sh"
+  exit 1
+fi
+
+echo "[+] Atualizando sistema..."
 apt update -y
-apt install -y ffmpeg nginx python3 python3-pip sqlite3 curl
 
-pip3 install flask psutil
+echo "[+] Instalando dependências..."
+apt install -y ffmpeg curl wget git python3 python3-pip
 
-# yt-dlp atualizado
+echo "[+] Instalando yt-dlp..."
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
 -o /usr/local/bin/yt-dlp
 chmod +x /usr/local/bin/yt-dlp
 
-mkdir -p "$APP" "$HLS" "$DB"
+mkdir -p "$BASE/hls"
 
-# ---------------- NGINX ----------------
+echo "[+] Criando menu IPTV..."
 
-cat > /etc/nginx/sites-enabled/default << EOF
-server {
-    listen 80;
+cat > "$BIN" << 'EOF'
+#!/usr/bin/env bash
 
-    location /hls {
-        root $BASE;
-        add_header Cache-Control no-cache;
-        types {
-            application/vnd.apple.mpegurl m3u8;
-            video/mp2t ts;
-        }
-    }
+BASE="/root/iptv_pro"
+HLS="$BASE/hls"
+PLAYLIST="$BASE/playlist.m3u"
 
-    location / {
-        proxy_pass http://127.0.0.1:5000;
-    }
+mkdir -p "$HLS"
+
+declare -A STREAMS
+
+start_server() {
+  cd "$HLS"
+  python3 -m http.server 8080 >/dev/null 2>&1 &
+  SERVER_PID=$!
 }
+
+add_youtube() {
+  read -rp "Nome do canal: " NAME
+  read -rp "Link YouTube: " LINK
+
+  (
+    while true; do
+      URL=$(yt-dlp -f best -g "$LINK" 2>/dev/null)
+      [ -z "$URL" ] && sleep 5 && continue
+
+      ffmpeg -re -i "$URL" \
+      -c copy \
+      -f hls \
+      -hls_time 4 \
+      -hls_list_size 6 \
+      "$HLS/$NAME.m3u8"
+
+      sleep 2
+    done
+  ) &
+
+  STREAMS["$NAME"]=$!
+}
+
+stop_stream() {
+  read -rp "Nome: " NAME
+  kill "${STREAMS[$NAME]}" 2>/dev/null
+  unset STREAMS["$NAME"]
+}
+
+export_playlist() {
+  IP=$(curl -s ifconfig.me)
+
+  echo "#EXTM3U" > "$PLAYLIST"
+
+  for FILE in "$HLS"/*.m3u8; do
+    [ -f "$FILE" ] || continue
+    NAME=$(basename "$FILE" .m3u8)
+
+    echo "#EXTINF:-1,$NAME" >> "$PLAYLIST"
+    echo "http://$IP:8080/$NAME.m3u8" >> "$PLAYLIST"
+  done
+
+  echo "Playlist criada:"
+  echo "$PLAYLIST"
+  read -rp "ENTER..."
+}
+
+dashboard() {
+  while true; do
+    clear
+    echo "===== IPTV PRO DASHBOARD ====="
+    echo "Streams ativas: ${#STREAMS[@]}"
+    echo
+
+    for NAME in "${!STREAMS[@]}"; do
+      PID="${STREAMS[$NAME]}"
+      if ps -p "$PID" >/dev/null 2>&1; then
+        echo "▶ $NAME ON"
+      else
+        echo "✖ $NAME OFF"
+      fi
+    done
+
+    sleep 2
+  done
+}
+
+backup() {
+  tar -czf "$BASE/backup.tar.gz" "$BASE"
+  echo "Backup criado em $BASE/backup.tar.gz"
+  read
+}
+
+menu() {
+  start_server
+
+  while true; do
+    clear
+    echo "===== IPTV PRO SERVER ====="
+    echo "1) Adicionar canal YouTube"
+    echo "2) Parar canal"
+    echo "3) Dashboard"
+    echo "4) Exportar playlist"
+    echo "5) Backup"
+    echo "0) Sair"
+    echo
+
+    read -rp "Opção: " OP
+
+    case "$OP" in
+      1) add_youtube ;;
+      2) stop_stream ;;
+      3) dashboard ;;
+      4) export_playlist ;;
+      5) backup ;;
+      0) exit ;;
+    esac
+  done
+}
+
+menu
 EOF
 
-systemctl restart nginx
+chmod +x "$BIN"
 
-# ---------------- DATABASE ----------------
-
-sqlite3 "$DB/users.db" << SQL
-CREATE TABLE IF NOT EXISTS users (
-id INTEGER PRIMARY KEY,
-username TEXT,
-password TEXT
-);
-INSERT OR IGNORE INTO users VALUES (1,'admin','admin123');
-SQL
-
-# ---------------- SERVER ----------------
-
-cat > "$APP/server.py" << 'PY'
-from flask import Flask, request, redirect
-import subprocess, os, psutil
-
-BASE="/root/ultraiptv"
-HLS=f"{BASE}/hls"
-
-app=Flask(__name__)
-streams={}
-
-@app.route("/")
-def panel():
-    cpu=psutil.cpu_percent()
-    ram=psutil.virtual_memory().percent
-
-    html=f"""
-    <h1>ULTRA IPTV CORE</h1>
-    CPU:{cpu}% RAM:{ram}%<br>
-    Streams:{list(streams.keys())}<br><br>
-
-    <form action='/add'>
-    Nome:<input name='name'>
-    Link:<input name='link' size='60'>
-    <button>Add</button>
-    </form><br>
-
-    <a href='/playlist'>Exportar Playlist</a>
-    """
-
-    return html
-
-@app.route("/add")
-def add():
-    name=request.args.get("name")
-    link=request.args.get("link")
-
-    cmd=f"""
-while true; do
-URL=$(yt-dlp -f b -g "{link}")
-ffmpeg -re -i "$URL" \
--c:v libx264 -preset veryfast -tune zerolatency \
--c:a aac -ar 44100 -ac 2 \
--f hls -hls_time 4 -hls_list_size 5 \
--hls_flags delete_segments \
-{HLS}/{name}.m3u8
-sleep 2
-done
-"""
-
-    p=subprocess.Popen(cmd, shell=True, executable="/bin/bash")
-    streams[name]=p.pid
-
-    return redirect("/")
-
-@app.route("/stop")
-def stop():
-    name=request.args.get("name")
-    if name in streams:
-        os.system(f"kill {streams[name]}")
-        del streams[name]
-    return redirect("/")
-
-@app.route("/playlist")
-def playlist():
-    ip=os.popen("hostname -I | awk '{print $1}'").read().strip()
-
-    out="#EXTM3U\n"
-    for f in os.listdir(HLS):
-        if f.endswith(".m3u8"):
-            n=f.replace(".m3u8","")
-            out+=f"#EXTINF:-1,{n}\nhttp://{ip}/hls/{f}\n"
-
-    return out,200,{"Content-Type":"application/vnd.apple.mpegurl"}
-
-app.run(host="0.0.0.0",port=5000)
-PY
-
-# ---------------- SYSTEMD ----------------
-
-cat > /etc/systemd/system/ultraiptv.service << EOF
-[Unit]
-Description=Ultra IPTV Core
-After=network.target
-
-[Service]
-ExecStart=python3 $APP/server.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable ultraiptv
-systemctl start ultraiptv
-
-echo ""
-echo "====================================="
-echo " ULTRA IPTV CORE INSTALADO ✔"
-echo "====================================="
-echo "Painel: http://SEU_IP"
-echo "Login: admin"
-echo "Senha: admin123"
-echo ""
+echo
+echo "================================="
+echo " INSTALAÇÃO CONCLUÍDA ✅"
+echo "================================="
+echo
+echo "Digite: menu"
+echo
